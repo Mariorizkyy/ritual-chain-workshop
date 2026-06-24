@@ -28,17 +28,23 @@ contract AIJudge is PrecompileConsumer {
         address submitter;
         string answer;
     }
-
+    struct Commitment {
+        bytes32 hash;
+        bool exists;
+        bool revealed;
+    }
     struct Bounty {
         address owner;
         string title;
         string rubric;
         uint256 reward;
-        uint256 deadline;
+        uint256 submissionDeadline;
+        uint256 revealDeadline;
         bool judged;
         bool finalized;
         bytes aiReview;
         uint256 winnerIndex;
+        mapping(address => Commitment) commitments;
         Submission[] submissions;
     }
 
@@ -86,7 +92,8 @@ contract AIJudge is PrecompileConsumer {
     function createBounty(
         string calldata title,
         string calldata rubric,
-        uint256 deadline
+        uint256 submissionDeadline,
+        uint256 revealDeadline
     ) external payable returns (uint256 bountyId) {
         require(msg.value > 0, "reward required");
 
@@ -98,44 +105,100 @@ contract AIJudge is PrecompileConsumer {
         bounty.title = title;
         bounty.rubric = rubric;
         bounty.reward = msg.value;
-        bounty.deadline = deadline;
+        bounty.submissionDeadline = submissionDeadline;
+        bounty.revealDeadline = revealDeadline;
         bounty.winnerIndex = type(uint256).max;
 
-        emit BountyCreated(bountyId, msg.sender, title, msg.value, deadline);
+        emit BountyCreated(bountyId, msg.sender, title, msg.value, submissionDeadline);
     }
 
-    function submitAnswer(
-        uint256 bountyId,
-        string calldata answer
-    ) external bountyExists(bountyId) {
-        Bounty storage bounty = bounties[bountyId];
+    function submitCommitment(
+    uint256 bountyId,
+    bytes32 commitment
+) external bountyExists(bountyId) {
+    Bounty storage bounty = bounties[bountyId];
 
-        // require(block.timestamp < bounty.deadline, "submissions closed");
-        require(!bounty.judged, "already judged");
-        require(!bounty.finalized, "already finalized");
-        require(
-            bounty.submissions.length < MAX_SUBMISSIONS,
-            "too many submissions"
+    require(
+        block.timestamp <= bounty.submissionDeadline,
+        "Submission closed"
+    );
+
+    require(!bounty.judged, "already judged");
+    require(!bounty.finalized, "already finalized");
+
+    require(
+        !bounty.commitments[msg.sender].exists,
+        "Already submitted"
+    );
+
+    bounty.commitments[msg.sender] = Commitment({
+        hash: commitment,
+        exists: true,
+        revealed: false
+    });
+}
+     function revealAnswer(
+    uint256 bountyId,
+    string calldata answer,
+    bytes32 salt
+) external bountyExists(bountyId) {
+
+    Bounty storage bounty = bounties[bountyId];
+
+    require(
+        block.timestamp > bounty.submissionDeadline,
+        "Submission still open"
+    );
+
+    require(
+        block.timestamp <= bounty.revealDeadline,
+        "Reveal closed"
+    );
+
+    require(
+        bounty.commitments[msg.sender].exists,
+        "No commitment"
+    );
+
+    require(
+        !bounty.commitments[msg.sender].revealed,
+        "Already revealed"
+    );
+
+    bytes32 expected =
+        keccak256(
+            abi.encodePacked(
+                answer,
+                salt,
+                msg.sender,
+                bountyId
+            )
         );
-        require(bytes(answer).length <= MAX_ANSWER_LENGTH, "answer too long");
 
-        bounty.submissions.push(
-            Submission({submitter: msg.sender, answer: answer})
-        );
+    require(
+        expected ==
+        bounty.commitments[msg.sender].hash,
+        "Invalid reveal"
+    );
 
-        emit AnswerSubmitted(
-            bountyId,
-            bounty.submissions.length - 1,
-            msg.sender
-        );
-    }
+    bounty.commitments[msg.sender].revealed = true;
 
+    bounty.submissions.push(
+        Submission({
+            submitter: msg.sender,
+            answer: answer
+        })
+    );
+}
     function judgeAll(
         uint256 bountyId,
         bytes calldata llmInput
     ) external bountyExists(bountyId) onlyOwner(bountyId) {
         Bounty storage bounty = bounties[bountyId];
-
+        require(
+    block.timestamp > bounty.revealDeadline,
+    "Reveal not finished"
+);
         require(!bounty.judged, "already judged");
         require(!bounty.finalized, "already finalized");
         require(bounty.submissions.length > 0, "no submissions");
@@ -209,7 +272,7 @@ contract AIJudge is PrecompileConsumer {
             bounty.title,
             bounty.rubric,
             bounty.reward,
-            bounty.deadline,
+            bounty.submissionDeadline,
             bounty.judged,
             bounty.finalized,
             bounty.submissions.length,
